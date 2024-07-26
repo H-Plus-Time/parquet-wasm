@@ -1,9 +1,15 @@
-use crate::error::WasmResult;
+use crate::{common::stream::WrappedWritableStream, error::WasmResult, log};
 #[cfg(feature = "reader")]
 use crate::read_options::ReaderOptions;
 use crate::utils::assert_parquet_file_not_empty;
 use arrow_wasm::{RecordBatch, Schema, Table};
+use async_compat::{Compat, CompatExt};
+use futures::{channel::oneshot, StreamExt};
+use js_sys::Reflect;
+use parquet::arrow::AsyncArrowWriter;
 use wasm_bindgen::prelude::*;
+use wasm_bindgen_futures::spawn_local;
+use web_sys::{CountQueuingStrategy, QueuingStrategy, QueuingStrategyInit, TransformStreamDefaultController};
 
 /// Read a Parquet file into Arrow data.
 ///
@@ -250,27 +256,44 @@ pub async fn read_parquet_stream(
     Ok(wasm_streams::ReadableStream::from_stream(stream).into_raw())
 }
 
-#[wasm_bindgen(js_name = "transformParquetStream")]
-#[cfg(all(feature = "writer", feature = "async"))]
-pub async fn transform_parquet_stream(
-    stream: wasm_streams::readable::sys::ReadableStream,
-    writer_properties: Option<crate::writer_properties::WriterProperties>,
-) -> WasmResult<wasm_streams::readable::sys::ReadableStream> {
-    use futures::{StreamExt, TryStreamExt};
-    use wasm_bindgen::convert::TryFromJsValue;
-
-    use crate::error::ParquetWasmError;
-    let batches = wasm_streams::ReadableStream::from_raw(stream)
-        .into_stream()
-        .map(|maybe_chunk| {
+#[wasm_bindgen]
+pub struct ParquetTransformStream {
+    readable: wasm_streams::readable::sys::ReadableStream,
+    writable: wasm_streams::writable::sys::WritableStream,
+}
+#[wasm_bindgen]
+impl ParquetTransformStream {
+    #[wasm_bindgen(constructor)]
+    pub async fn try_new(writer_properties: Option<crate::writer_properties::WriterProperties>) -> WasmResult<ParquetTransformStream> {
+        use futures::{StreamExt, TryStreamExt};
+        use wasm_bindgen::convert::TryFromJsValue;
+        use crate::error::ParquetWasmError;
+        let raw_stream = wasm_streams::transform::sys::TransformStream::new().map_err(|_err| {
+            ParquetWasmError::PlatformSupportError("Failed to create TransformStream".to_string())
+        })?;
+        let writable = raw_stream.writable();
+        let readable = raw_stream.readable();
+        let intermediate_options = writer_properties.unwrap_or_default();
+        let inner_readable = wasm_streams::ReadableStream::from_raw(readable).into_stream()
+            .map(|maybe_chunk| {
             let chunk = maybe_chunk?;
             arrow_wasm::RecordBatch::try_from_js_value(chunk)
         })
         .map_err(ParquetWasmError::DynCastingError);
-    let output_stream = super::writer_async::transform_parquet_stream(
-        batches,
-        writer_properties.unwrap_or_default(),
-    )
-    .await;
-    Ok(output_stream?)
+        let out_readable = super::writer_async::generate_output_stream(inner_readable, intermediate_options).await?;
+
+        Ok(ParquetTransformStream {
+            writable,
+            readable: out_readable
+        })
+    }
+
+    #[wasm_bindgen(getter)]
+    pub fn readable(&self) -> wasm_streams::readable::sys::ReadableStream {
+        return self.readable.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn writable(&self) -> wasm_streams::writable::sys::WritableStream {
+        return self.writable.clone()
+    }
 }

@@ -109,6 +109,8 @@ features = [
   "Document",
   "Element",
   "File",
+  "CountQueuingStrategy",
+  "QueuingStrategyInit"
 ]
 
 [dev-dependencies]

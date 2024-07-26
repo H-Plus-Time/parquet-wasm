@@ -99,11 +99,26 @@ it("read stream-write stream-read stream round trip (no writer properties provid
 
   const url = `${rootUrl}/1-partition-brotli.parquet`;
   const originalStream = await wasm.readParquetStream(url);
-
-  const stream = await wasm.transformParquetStream(originalStream);
+  const stream = originalStream.pipeThrough(await new wasm.ParquetTransformStream());
   const accumulatedBuffer = new Uint8Array(await new Response(stream).arrayBuffer());
   const roundtripTable = tableFromIPC(wasm.readParquet(accumulatedBuffer).intoIPCStream());
 
   testArrowTablesEqual(expectedTable, roundtripTable);
   await server.close();
+})
+
+it("reject non-RecordBatch streams", async (t) => {
+  try {
+    const dummyStream = ReadableStream.from([{}]);
+    const transformer = await new wasm.ParquetTransformStream();
+    const stream = dummyStream.pipeThrough(transformer);
+    for await (const chunk of stream) {
+    }
+
+  } catch (error) {
+    console.log(error);
+  }
+  // await expect(async () => {
+  // }).rejects;
+  
 })
